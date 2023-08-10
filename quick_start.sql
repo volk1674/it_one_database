@@ -11,18 +11,18 @@ declare
     myMoney double precision;
     ship record;
 BEGIN
-    select game_time into currentTime from world.global;
-    select money into myMoney from world.players where id=player_id;
-    raise notice '[PLAYER %] time: % and money: %', player_id, currentTime, myMoney;
-    for ship in
-        select
-            ships.id as ship,
-            island
-        from world.ships
-        join world.parked_ships
-            on ships.id=parked_ships.ship
-            and ships.player=player_id
-        loop
-            call moveToTheNextIsland(player_id, ship.ship, ship.island % 10 + 1);
-        end loop;
+--     select game_time into currentTime from world.global;
+--     select money into myMoney from world.players where id=player_id;
+--     raise notice '[PLAYER %] time: % and money: %', player_id, currentTime, myMoney;
+--     for ship in
+--         select
+--             ships.id as ship,
+--             island
+--         from world.ships
+--         join world.parked_ships
+--             on ships.id=parked_ships.ship
+--             and ships.player=player_id
+--         loop
+--             call moveToTheNextIsland(player_id, ship.ship, ship.island % 10 + 1);
+--         end loop;
 END $$;
