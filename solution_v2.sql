@@ -264,8 +264,6 @@ DECLARE
     v_game_time DOUBLE PRECISION = r_global.game_time;
     v_ts        TIMESTAMP        = LOCALTIMESTAMP;
 BEGIN
-    INSERT INTO h_players SELECT v_ts, v_game_time, t.* FROM world.players t;
-
     INSERT INTO h_contractors SELECT v_ts, v_game_time, t.* FROM world.contractors t;
     INSERT INTO h_contracts SELECT v_ts, v_game_time, t.* FROM world.contracts t;
     INSERT INTO h_storage SELECT v_ts, v_game_time, t.* FROM world.storage t;
@@ -275,6 +273,8 @@ BEGIN
     INSERT INTO h_transferring_ships SELECT v_ts, v_game_time, t.* FROM world.transferring_ships t;
     INSERT INTO h_cargo SELECT v_ts, v_game_time, t.* FROM world.cargo t;
     INSERT INTO h_ships SELECT v_ts, v_game_time, t.* FROM world.ships t;
+    INSERT INTO h_players SELECT v_ts, v_game_time, t.* FROM world.players t;
+
     INSERT INTO h_my_ship_delivery_before SELECT v_ts, v_game_time, t.* FROM my_ship_delivery t;
 
     -- events
@@ -446,7 +446,7 @@ BEGIN
                         JOIN price_restriction pr ON pr.item = v.item AND v.price_per_unit < pr.max_purchase_price
                         LEFT JOIN world.storage s ON s.item = v.item AND s.island = v.island AND s.player = player_id
                         LEFT JOIN delivery ON delivery.v_island = v.island
-               WHERE COALESCE(s.quantity, 0) < 1500 + COALESCE(delivery.total, 0)
+               WHERE COALESCE(s.quantity, 0) < 2000 + COALESCE(delivery.total, 0)
                ORDER BY v.item, v.price_per_unit
         LOOP
         -- покупаем пока все подряд, что можно продать дороже.
@@ -682,7 +682,7 @@ BEGIN
                                                      WHERE s.item = c.item
                                                        AND s.island = c.island
                                                        AND s.player = player_id
-                                                       AND s.quantity > 3000 -- здесь надо еще смотреть на текущее игровое время и сложившуюся скорость потребления товаров на острове.
+                                                       AND s.quantity > 2000 -- здесь надо еще смотреть на текущее игровое время и сложившуюся скорость потребления товаров на острове.
                                         ))
                           SELECT v.item,
                                  v.island                                               v_island,
@@ -748,7 +748,7 @@ BEGIN
                                                    WHERE s.item = c.item
                                                      AND s.island = c.island
                                                      AND s.player = player_id
-                                                     AND s.quantity > 3000 -- здесь надо еще смотреть на текущее игровое время и сложившуюся скорость потребления товаров на острове.
+                                                     AND s.quantity > 2000 -- здесь надо еще смотреть на текущее игровое время и сложившуюся скорость потребления товаров на острове.
                                             ))
                           SELECT v.item,
                                  v.island                                               v_island,
