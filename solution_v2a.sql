@@ -310,88 +310,30 @@ SELECT t.id, t.island, t.item, t.price_per_unit, t.quantity
 FROM world.contractors t
 WHERE t.type = 'vendor';
 
---region аналитика
-
--- по товару
-CREATE TABLE item_analytics
-(
-    -- товар
-    item               INTEGER NOT NULL,
-    -- минимальная цена продажи
-    min_sale_price     DOUBLE PRECISION,
-    -- максимальная цена покупки
-    max_purchase_price DOUBLE PRECISION
-);
-
--- по товару и острову
-CREATE TABLE item_island_analytics
-(
-    -- товар
-    item               INTEGER NOT NULL,
-    -- остров
-    island             INTEGER NOT NULL,
-    -- средняя цена продажи на острове
-    avg_price_per_unit DOUBLE PRECISION,
-    -- тип острова (продавец или покупатель)
-    type               world.contractor_type
-);
-
--- Обновить аналитику
-CREATE OR REPLACE PROCEDURE update_analytics(player_id INTEGER, r_global world.global)
-    LANGUAGE plpgsql AS
-$$
-DECLARE
-    v_error_message  TEXT;
-    v_price_fraction DOUBLE PRECISION = 0.85;
-BEGIN
-    -- Через v_price_fraction будем регулировать закупки. Если объем предложения больше
-    -- объема спроса v_price_fraction будем уменьшать, иначе - увеличивать.
-    TRUNCATE item_analytics;
-
-    IF r_global.game_time > 25000 THEN
-        v_price_fraction = 0.80;
-    END IF;
-
-    IF r_global.game_time > 50000 THEN
-        v_price_fraction = 0.70;
-    END IF;
-
-    INSERT INTO item_analytics
-    WITH cp AS (SELECT c.item, PERCENTILE_CONT(v_price_fraction) WITHIN GROUP (ORDER BY price_per_unit) s_price
-                FROM customers c
-                GROUP BY c.item),
-         vp AS (SELECT v.item, PERCENTILE_CONT(v_price_fraction) WITHIN GROUP (ORDER BY price_per_unit DESC) p_price
-                FROM vendors v
-                GROUP BY v.item)
-    SELECT cp.item, cp.s_price, LEAST(vp.p_price, cp.s_price)
-    FROM cp,
-         vp
-    WHERE cp.item = vp.item;
-
-
-    TRUNCATE TABLE item_island_analytics;
-
-    INSERT INTO item_island_analytics(item, island, avg_price_per_unit, type)
-    SELECT c.item, c.island, AVG(c.price_per_unit), 'customer'
-    FROM customers c
-             JOIN item_analytics a ON a.item = c.item AND c.price_per_unit >= a.min_sale_price
-    GROUP BY c.item, c.island;
-
-    INSERT INTO item_island_analytics(item, island, avg_price_per_unit, type)
-    SELECT v.item, v.island, AVG(v.price_per_unit), 'vendor'
-    FROM vendors v
-             JOIN item_analytics a ON a.item = v.item AND v.price_per_unit <= a.max_purchase_price
-    GROUP BY v.item, v.island;
-
-EXCEPTION
-    WHEN OTHERS THEN
-        GET STACKED DIAGNOSTICS
-            v_error_message = MESSAGE_TEXT;
-
-        RAISE NOTICE '[%] time %, update_analytics error! %', player_id, r_global.game_time, v_error_message;
-END
-$$;
-
+-- небольшая аналитика покупателей
+CREATE OR REPLACE VIEW analytics AS
+WITH ca AS (SELECT c.item,
+                   PERCENTILE_CONT(0.4) WITHIN GROUP ( ORDER BY price_per_unit ) purchase_price,
+                   COUNT(DISTINCT c.id)                                          cnt,
+                   MAX(c.price_per_unit)                                         max_price,
+                   MIN(c.price_per_unit)                                         min_price
+            FROM customers c
+            WHERE NOT EXISTS(SELECT 1
+                             FROM world.storage s
+                                      JOIN my_player ON s.player = my_player.id
+                             WHERE s.item = c.item
+                               AND s.island = c.island
+                               AND s.quantity > 2000 -- здесь надо еще смотреть на текущее игровое время и сложившуюся скорость потребления товаров на острове.
+                )
+            GROUP BY c.item),
+     sa AS (SELECT s.item,
+                   SUM(s.quantity) storage_quantity
+            FROM world.storage s
+                     JOIN my_player ON my_player.id = s.player
+            GROUP BY s.item)
+SELECT ca.*, sa.storage_quantity
+FROM ca
+         LEFT JOIN sa ON ca.item = sa.item;
 
 -- endregion
 
@@ -439,18 +381,23 @@ DECLARE
     v_error_message     TEXT;
     rec                 RECORD;
     v_delivery_quantity DOUBLE PRECISION;
+    v_price_fraction    DOUBLE PRECISION = 0.3;
 BEGIN
-    <<customers_loop>>
+
     FOR rec IN
+        WITH price_restriction AS (SELECT c.item,
+                                          PERCENTILE_CONT(v_price_fraction) WITHIN GROUP ( ORDER BY price_per_unit ) max_purchase_price
+                                   FROM customers c
+                                   GROUP BY c.item)
         SELECT c.id, c.island, c.quantity, c.price_per_unit, c.item, COALESCE(s.quantity, 0) AS storage_quantity
         FROM customers c
                  LEFT JOIN world.storage s ON s.island = c.island AND s.item = c.item AND s.player = player_id
-                 JOIN item_analytics pr ON pr.item = c.item
+                 JOIN price_restriction pr ON pr.item = c.item
         WHERE NOT EXISTS(SELECT 1
                          FROM world.contracts cc
                          WHERE cc.player = player_id
                            AND cc.contractor = c.id)
-          AND pr.min_sale_price < c.price_per_unit
+          AND pr.max_purchase_price < c.price_per_unit
         ORDER BY c.price_per_unit DESC
         LOOP
             IF rec.quantity < rec.storage_quantity THEN
@@ -484,21 +431,22 @@ CREATE OR REPLACE PROCEDURE make_purchases(player_id INTEGER, r_global world.glo
     LANGUAGE plpgsql AS
 $$
 DECLARE
-    v_error_message TEXT;
-    rec             RECORD;
+    v_error_message  TEXT;
+    rec              RECORD;
+    v_price_fraction DOUBLE PRECISION = 0.3;
 BEGIN
-    IF 100000 - r_global.game_time < 4000 THEN
-        -- прекращаем покупки в самом конце. надо допродать уже купленное.
-        RETURN;
-    END IF;
 
-    FOR rec IN WITH delivery AS (SELECT v_island, SUM(quantity) AS total FROM my_ship_delivery GROUP BY v_island)
+    FOR rec IN WITH delivery AS (SELECT v_island, SUM(quantity) AS total FROM my_ship_delivery GROUP BY v_island),
+                    price_restriction AS (SELECT c.item,
+                                                 PERCENTILE_CONT(v_price_fraction) WITHIN GROUP ( ORDER BY price_per_unit ) max_purchase_price
+                                          FROM customers c
+                                          GROUP BY c.item)
                SELECT v.*
                FROM vendors v
-                        JOIN item_analytics pr ON pr.item = v.item AND v.price_per_unit < pr.max_purchase_price
+                        JOIN price_restriction pr ON pr.item = v.item AND v.price_per_unit < pr.max_purchase_price
                         LEFT JOIN world.storage s ON s.item = v.item AND s.island = v.island AND s.player = player_id
                         LEFT JOIN delivery ON delivery.v_island = v.island
-               WHERE COALESCE(s.quantity, 0) < 1000 + COALESCE(delivery.total, 0)
+               WHERE COALESCE(s.quantity, 0) < 1500 + COALESCE(delivery.total, 0)
                ORDER BY v.item, v.price_per_unit
         LOOP
         -- покупаем пока все подряд, что можно продать дороже.
@@ -531,7 +479,7 @@ CREATE TABLE my_ship_delivery
 
 
 -- обработка событий погрузки, разгрузки и формирование команд на разгрузку погрузку.
-CREATE OR REPLACE PROCEDURE process_transfers_events(player_id INTEGER, r_global world.global)
+CREATE OR REPLACE PROCEDURE process_transfers(player_id INTEGER, r_global world.global)
     LANGUAGE plpgsql AS
 $$
 DECLARE
@@ -567,25 +515,6 @@ BEGIN
         LOOP
             RAISE NOTICE '[%] time %, process_transfers state error! %', player_id, r_global.game_time, rec;
         END LOOP;
-
-EXCEPTION
-    WHEN OTHERS THEN
-        GET STACKED DIAGNOSTICS
-            v_error_message = MESSAGE_TEXT;
-
-        RAISE NOTICE '[%] time %, process_transfers error! %', player_id, r_global.game_time, v_error_message;
-END
-$$;
-
-
--- обработка событий погрузки, разгрузки и формирование команд на разгрузку погрузку.
-CREATE OR REPLACE PROCEDURE process_transfers_commands(player_id INTEGER, r_global world.global)
-    LANGUAGE plpgsql AS
-$$
-DECLARE
-    v_error_message TEXT;
-    rec             RECORD;
-BEGIN
 
     --region новые команды на погрузку
     FOR rec IN (SELECT *
@@ -626,6 +555,7 @@ EXCEPTION
         RAISE NOTICE '[%] time %, process_transfers error! %', player_id, r_global.game_time, v_error_message;
 END
 $$;
+
 
 
 -- обработка событий движения и отправка загруженных кораблей
@@ -706,79 +636,78 @@ BEGIN
     -- если на острове покупателя накопились товары - временно исключаем покупателя из закупок.
     -- корабли не должны перемещаться незаполненными.
 
+
     --region для кораблей которым уже назначена доставка, но суммарный вес доставки еще не полностью заполнил корабль пытаемся докинуть товаров.
-    IF FALSE THEN
-        FOR r_ship IN (WITH d AS (SELECT d.ship, d.v_island, d.c_island, SUM(d.quantity) total_quantity
-                                  FROM my_ship_delivery d
-                                  WHERE d.state IN (0, 1, 2, 3)
-                                  GROUP BY d.ship, d.v_island, d.c_island)
-                       SELECT ship.*, d.v_island, d.c_island, d.total_quantity
-                       FROM world.ships ship
-                                JOIN d ON d.ship = ship.id AND d.total_quantity / ship.capacity < 0.9
-                           -- доставки планируются только для припаркованных кораблей
-                                LEFT JOIN world.parked_ships ps ON ps.ship = ship.id
-                           -- корабль может загружаться
-                                LEFT JOIN world.transferring_ships ts ON ts.ship = ship.id
-                       WHERE ship.player = player_id
-                         AND COALESCE(ps.island, ts.island) = d.v_island)
-            LOOP
-                v_total_quantity = r_ship.total_quantity;
-                <<roads_loop_0>>
-                FOR r_road IN WITH
-                                  -- то что уже запланировано для погрузки и этого как бы уже нет на складе
-                                  total_ship_delivery AS (SELECT v_island, item, SUM(quantity) total_quantity
-                                                          FROM my_ship_delivery d
-                                                          WHERE d.state IN (0, 1)
-                                                          GROUP BY d.item, v_island),
-                                  -- откуда и что можем везти
-                                  v AS (SELECT s.island,
-                                               s.item,
-                                               s.quantity - COALESCE(tsd.total_quantity, 0) AS quantity,
-                                               v.price_per_unit
-                                        FROM world.storage s
-                                                 JOIN vendors v ON s.island = v.island AND v.item = s.item
-                                                 LEFT JOIN total_ship_delivery tsd ON tsd.v_island = v.island AND tsd.item = v.item
-                                        WHERE s.player = player_id
-                                          -- учитываем то что уже запланировано
-                                          AND s.quantity - COALESCE(tsd.total_quantity, 0) > r_ship.capacity * 0.1
-                                          AND s.island = r_ship.v_island),
-                                  -- куда можем везти
-                                  c AS (SELECT c.island, c.item, c.price_per_unit
-                                        FROM customers c
-                                        WHERE c.island = r_ship.c_island
-                                          -- исключаем покупателей у которых и так много товаров в очереди
-                                          AND NOT EXISTS(SELECT 1
-                                                         FROM world.storage s
-                                                         WHERE s.item = c.item
-                                                           AND s.island = c.island
-                                                           AND s.player = player_id
-                                                           AND s.quantity > 3000 -- здесь надо еще смотреть на текущее игровое время и сложившуюся скорость потребления товаров на острове.
-                                            ))
-                              SELECT v.item,
-                                     v.island                                               v_island,
-                                     v.quantity,
-                                     c.island                                               c_island,
-                                     LEAST(v.quantity, r_ship.capacity) * (c.price_per_unit - v.price_per_unit) /
-                                     (r_ship.capacity * 2
-                                         + get_distance(r_ship.v_island, v.island) / r_ship.speed
-                                         + get_distance(v.island, c.island) / r_ship.speed) factor
-                              FROM v
-                                       JOIN c ON v.item = c.item AND v.price_per_unit < c.price_per_unit
-                              ORDER BY factor DESC
-                    LOOP
-                        v_quantity = TRUNC(LEAST(r_road.quantity, r_ship.capacity - v_total_quantity)::NUMERIC, 5);
+    FOR r_ship IN (WITH d AS (SELECT d.ship, d.v_island, d.c_island, SUM(d.quantity) total_quantity
+                              FROM my_ship_delivery d
+                              WHERE d.state IN (0, 1, 2, 3)
+                              GROUP BY d.ship, d.v_island, d.c_island)
+                   SELECT ship.*, d.v_island, d.c_island, d.total_quantity
+                   FROM world.ships ship
+                            JOIN d ON d.ship = ship.id AND d.total_quantity / ship.capacity < 0.9
+                       -- доставки планируются только для припаркованных кораблей
+                            LEFT JOIN world.parked_ships ps ON ps.ship = ship.id
+                       -- корабль может загружаться
+                            LEFT JOIN world.transferring_ships ts ON ts.ship = ship.id
+                   WHERE ship.player = player_id
+                     AND COALESCE(ps.island, ts.island) = d.v_island)
+        LOOP
+            v_total_quantity = r_ship.total_quantity;
+            <<roads_loop_0>>
+            FOR r_road IN WITH
+                              -- то что уже запланировано для погрузки и этого как бы уже нет на складе
+                              total_ship_delivery AS (SELECT v_island, item, SUM(quantity) total_quantity
+                                                      FROM my_ship_delivery d
+                                                      WHERE d.state IN (0, 1)
+                                                      GROUP BY d.item, v_island),
+                              -- откуда и что можем везти
+                              v AS (SELECT s.island,
+                                           s.item,
+                                           s.quantity - COALESCE(tsd.total_quantity, 0) AS quantity,
+                                           v.price_per_unit
+                                    FROM world.storage s
+                                             JOIN vendors v ON s.island = v.island AND v.item = s.item
+                                             LEFT JOIN total_ship_delivery tsd ON tsd.v_island = v.island AND tsd.item = v.item
+                                    WHERE s.player = player_id
+                                      -- учитываем то что уже запланировано
+                                      AND s.quantity - COALESCE(tsd.total_quantity, 0) > r_ship.capacity * 0.1
+                                      AND s.island = r_ship.v_island),
+                              -- куда можем везти
+                              c AS (SELECT c.island, c.item, c.price_per_unit
+                                    FROM customers c
+                                    WHERE c.island = r_ship.c_island
+                                      -- исключаем покупателей у которых и так много товаров в очереди
+                                      AND NOT EXISTS(SELECT 1
+                                                     FROM world.storage s
+                                                     WHERE s.item = c.item
+                                                       AND s.island = c.island
+                                                       AND s.player = player_id
+                                                       AND s.quantity > 3000 -- здесь надо еще смотреть на текущее игровое время и сложившуюся скорость потребления товаров на острове.
+                                        ))
+                          SELECT v.item,
+                                 v.island                                               v_island,
+                                 v.quantity,
+                                 c.island                                               c_island,
+                                 LEAST(v.quantity, r_ship.capacity) * (c.price_per_unit - v.price_per_unit) /
+                                 (r_ship.capacity * 2
+                                     + get_distance(r_ship.v_island, v.island) / r_ship.speed
+                                     + get_distance(v.island, c.island) / r_ship.speed) factor
+                          FROM v
+                                   JOIN c ON v.item = c.item AND v.price_per_unit < c.price_per_unit
+                          ORDER BY factor DESC
+                LOOP
+                    v_quantity = TRUNC(LEAST(r_road.quantity, r_ship.capacity - v_total_quantity)::NUMERIC, 5);
 
-                        INSERT INTO my_ship_delivery(ship, quantity, v_island, c_island, item)
-                        VALUES (r_ship.id, v_quantity, r_road.v_island, r_road.c_island, r_road.item);
+                    INSERT INTO my_ship_delivery(ship, quantity, v_island, c_island, item)
+                    VALUES (r_ship.id, v_quantity, r_road.v_island, r_road.c_island, r_road.item);
 
-                        v_total_quantity = v_total_quantity + v_quantity;
+                    v_total_quantity = v_total_quantity + v_quantity;
 
-                        IF ABS(v_total_quantity - r_ship.capacity) < 1 THEN
-                            EXIT roads_loop_0;
-                        END IF;
-                    END LOOP;
-            END LOOP;
-    END IF;
+                    IF ABS(v_total_quantity - r_ship.capacity) < 1 THEN
+                        EXIT roads_loop_0;
+                    END IF;
+                END LOOP;
+        END LOOP;
     -- endregion
 
     --region для кораблей которым еще не назначена доставка пытаемся подобрать новую доставку без ограничения откуда и куда плывем
@@ -788,7 +717,6 @@ BEGIN
                            JOIN world.parked_ships ps ON ps.ship = ship.id
                   WHERE ship.player = player_id
                     AND NOT EXISTS(SELECT 1 FROM my_ship_delivery d WHERE d.ship = ship.id)
-                  ORDER BY ship.capacity * ship.speed DESC
         LOOP
             v_total_quantity = 0;
 
@@ -804,35 +732,34 @@ BEGIN
                               v AS (SELECT s.island,
                                            s.item,
                                            s.quantity - COALESCE(tsd.total_quantity, 0) AS quantity,
-                                           v.avg_price_per_unit
+                                           v.price_per_unit
                                     FROM world.storage s
-                                             JOIN item_island_analytics v
-                                                  ON s.island = v.island AND v.item = s.item AND v.type = 'vendor'
+                                             JOIN vendors v ON s.island = v.island AND v.item = s.item
                                              LEFT JOIN total_ship_delivery tsd ON tsd.v_island = v.island AND tsd.item = v.item
                                     WHERE s.player = player_id
-                                      AND (s.quantity - COALESCE(tsd.total_quantity, 0)) > r_ship.capacity * 0.3),
+                                      AND (s.quantity - COALESCE(tsd.total_quantity, 0)) > r_ship.capacity * 0.8),
                               -- куда можем везти
-                              c AS (SELECT c.island, c.item, c.avg_price_per_unit
-                                    FROM item_island_analytics c
-                                    WHERE c.type = 'customer'
-                                      -- исключаем покупателей у которых и так много товаров в очереди
-                                      AND NOT EXISTS(SELECT 1
-                                                     FROM world.storage s
-                                                     WHERE s.item = c.item
-                                                       AND s.island = c.island
-                                                       AND s.player = player_id
-                                                       AND s.quantity > 2000 -- здесь надо еще смотреть на текущее игровое время и сложившуюся скорость потребления товаров на острове.
-                                        ))
+                              c AS (SELECT c.island, c.item, c.price_per_unit
+                                    FROM customers c
+                                    WHERE
+                                        -- исключаем покупателей у которых и так много товаров в очереди
+                                        NOT EXISTS(SELECT 1
+                                                   FROM world.storage s
+                                                   WHERE s.item = c.item
+                                                     AND s.island = c.island
+                                                     AND s.player = player_id
+                                                     AND s.quantity > 3000 -- здесь надо еще смотреть на текущее игровое время и сложившуюся скорость потребления товаров на острове.
+                                            ))
                           SELECT v.item,
                                  v.island                                               v_island,
                                  v.quantity,
                                  c.island                                               c_island,
-                                 LEAST(v.quantity, r_ship.capacity) * (c.avg_price_per_unit - v.avg_price_per_unit) /
+                                 LEAST(v.quantity, r_ship.capacity) * (c.price_per_unit - v.price_per_unit) /
                                  (r_ship.capacity * 2
                                      + get_distance(r_ship.island, v.island) / r_ship.speed
                                      + get_distance(v.island, c.island) / r_ship.speed) factor
                           FROM v
-                                   JOIN c ON v.item = c.item AND v.avg_price_per_unit < c.avg_price_per_unit
+                                   JOIN c ON v.item = c.item AND v.price_per_unit < c.price_per_unit
                           ORDER BY factor DESC
                 LOOP
                     IF v_total_quantity = 0 THEN
@@ -891,16 +818,14 @@ BEGIN
     -- CALL save_history(r_global);
 
     IF EXISTS(SELECT(1) FROM events.wait_finished) THEN
-        INSERT INTO actions.wait(until) VALUES (r_global.game_time + 50);
+        INSERT INTO actions.wait(until) VALUES (r_global.game_time + 100);
     END IF;
 
-    CALL update_analytics(player_id, r_global);
     CALL make_purchases(player_id, r_global);
 
     IF r_global.game_time > 0 THEN
-        CALL process_transfers_events(player_id, r_global);
+        CALL process_transfers(player_id, r_global);
         CALL process_deliveries(player_id, r_global);
-        CALL process_transfers_commands(player_id, r_global);
         CALL process_moves(player_id, r_global);
         CALL make_customers_contracts(player_id, r_global);
     END IF;
