@@ -356,6 +356,10 @@ BEGIN
         v_price_fraction = 0.70;
     END IF;
 
+    IF r_global.game_time > 90000 THEN
+        v_price_fraction = 0;
+    END IF;
+
     INSERT INTO item_analytics
     WITH cp AS (SELECT c.item, PERCENTILE_CONT(v_price_fraction) WITHIN GROUP (ORDER BY price_per_unit) s_price
                 FROM customers c
@@ -567,6 +571,8 @@ BEGIN
         LOOP
             RAISE NOTICE '[%] time %, process_transfers state error! %', player_id, r_global.game_time, rec;
         END LOOP;
+
+    DELETE FROM my_ship_delivery WHERE state IN (1, 4);
 
 EXCEPTION
     WHEN OTHERS THEN
@@ -890,9 +896,9 @@ BEGIN
 
     -- CALL save_history(r_global);
 
-    IF EXISTS(SELECT(1) FROM events.wait_finished) THEN
-        INSERT INTO actions.wait(until) VALUES (r_global.game_time + 50);
-    END IF;
+
+    INSERT INTO actions.wait(until) VALUES (r_global.game_time + 10);
+
 
     CALL update_analytics(player_id, r_global);
     CALL make_purchases(player_id, r_global);

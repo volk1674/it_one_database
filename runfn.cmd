@@ -1,11 +1,11 @@
-docker run -p5432:5432 -p5433:5433 -p5434:5434 -p5435:5435 -p5436:5436 ^
-  --mount "type=bind,src=C:\ivolkov\dev\mail-all-cups\it_one_cup_sql/solution_v3d.sql,dst=/tmp/player1-solution.sql" ^
+docker run ^
+  --mount "type=bind,src=C:\ivolkov\dev\mail-all-cups\it_one_cup_sql/solution_v3c.sql,dst=/tmp/player1-solution.sql" ^
   --mount "type=bind,src=C:\ivolkov\dev\mail-all-cups\it_one_cup_sql/solution_v3b.sql,dst=/tmp/player2-solution.sql" ^
   --mount "type=bind,src=C:\ivolkov\dev\mail-all-cups\it_one_cup_sql/solution.sql,dst=/tmp/player3-solution.sql" ^
   --mount "type=bind,src=C:\ivolkov\dev\mail-all-cups\it_one_cup_sql/solution_v3b.sql,dst=/tmp/player4-solution.sql" ^
   --mount "type=bind,src=C:\ivolkov\dev\mail-all-cups\it_one_cup_sql/init.sql,dst=/tmp/init.sql" ^
   --mount "type=bind,src=C:\ivolkov\dev\mail-all-cups\it_one_cup_sql/R3-options.toml,dst=/tmp/options.toml" ^
-  --rm -it -e SEED=980245 ghcr.io/all-cups/it_one_cup_sql ^
+  --rm -it -e SEED=%1 ghcr.io/all-cups/it_one_cup_sql ^
   --solution /tmp/player1-solution.sql ^
   --solution /tmp/player2-solution.sql ^
   --dump-init /tmp/init.sql ^
